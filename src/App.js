@@ -21,9 +21,16 @@ export default function GoldGarden() {
   const [selectedCells, setSelectedCells] = useState(new Set());
   const [isCompactFlowers, setIsCompactFlowers] = useState(false);
   const [selectedMode, setSelectedMode] = useState('plant'); // 'plant' (посадка), 'dig' (выкопать), 'fertilize' (удобрить)
+  const [shopTab, setShopTab] = useState('flowers'); // 'flowers' | 'decor'
   const [contextMenu, setContextMenu] = useState({ show: false, x: 0, y: 0, gardenIndex: null });
   const [tempGardenName, setTempGardenName] = useState('');
   const [tempGardenColor, setTempGardenColor] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [priceSort, setPriceSort] = useState('none'); // 'asc' | 'desc' | 'none'
+  const [gardenTabsPage, setGardenTabsPage] = useState(0);
+  const [draggedFlower, setDraggedFlower] = useState(null);
+  const [playerName, setPlayerName] = useState(localStorage.getItem('gg_player') || 'player1');
+  const [tempPlayerName, setTempPlayerName] = useState(localStorage.getItem('gg_player') || 'player1');
 
   const GARDEN_COLORS = [
     '#FF4136', '#FF851B', '#FFDC00', '#2ECC40', '#3D9970', '#7FDBFF', '#0074D9', '#B10DC9', '#F012BE', '#FFFFFF', '#AAAAAA', '#111111'
@@ -75,44 +82,135 @@ export default function GoldGarden() {
         setSelectedMode(prev => prev === 'fertilize' ? null : 'fertilize');
         playSound('switch');
       }
+      if (e.key === 'c' || e.key === 'C') {
+        setSelectedMode(prev => prev === 'transplant' ? null : 'transplant');
+        playSound('switch');
+      }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
   }, [contextMenu.show]);
 
+  useEffect(() => {
+    localStorage.setItem('gg_player', playerName);
+  }, [playerName]);
+
+  function initNewPlayer() {
+    setCoins(GAME_CONFIG.INITIAL_COINS);
+    setGardens([createGarden('Сад 1', '#dcfce7')]);
+    setCurrentGarden(0);
+    setUnlockedFlowers(['daisy']);
+    setSelectedFlower('daisy');
+    setInventory({});
+    setHistory([]);
+  }
+
+  function loadState(name) {
+    try {
+      const raw = localStorage.getItem('gg_save:' + name);
+      if (raw) {
+        const s = JSON.parse(raw);
+        setCoins(s.coins ?? GAME_CONFIG.INITIAL_COINS);
+        setGardens(s.gardens ?? [createGarden('Сад 1', '#dcfce7')]);
+        setCurrentGarden(s.currentGarden ?? 0);
+        setUnlockedFlowers(s.unlockedFlowers ?? ['daisy']);
+        setSelectedFlower(s.selectedFlower ?? 'daisy');
+        setInventory(s.inventory ?? {});
+        setHistory(s.history ?? []);
+      } else {
+        initNewPlayer();
+      }
+    } catch (e) {
+      initNewPlayer();
+    }
+  }
+
+  useEffect(() => {
+    loadState(playerName);
+  }, []);
+
+  useEffect(() => {
+    const payload = { coins, gardens, currentGarden, unlockedFlowers, selectedFlower, inventory, history };
+    try {
+      localStorage.setItem('gg_save:' + playerName, JSON.stringify(payload));
+    } catch (e) {}
+  }, [coins, gardens, currentGarden, unlockedFlowers, selectedFlower, inventory, history, playerName]);
+
   // Growth tick
   useEffect(() => {
     const interval = setInterval(() => {
-      setGardens(prevGardens => prevGardens.map(garden => ({
-        ...garden,
-        grid: garden.grid.map(cell => {
-          if (!cell.flower) return cell;
-          const flowerConfig = GAME_CONFIG.FLOWERS[cell.flower.type];
-          if (!flowerConfig) return cell; // Skip invalid flower types
-
-          const elapsedTime = (Date.now() - cell.flower.plantedAt) / 1000;
-          const progress = elapsedTime / flowerConfig.growthTime;
-
-          let stage;
-          if (progress < 0.33) stage = 0;
-          else if (progress < 0.66) stage = 1;
-          else if (progress < 1) stage = 2;
-          else stage = 3;
-
-          let newFlower = { ...cell.flower, growthStage: stage };
-
-          if (flowerConfig.isInfinite && stage >= 3) {
-            const yieldProgress = (elapsedTime - flowerConfig.growthTime) / flowerConfig.yieldInterval;
-            const newYieldCount = Math.min(Math.floor(yieldProgress) + 1, flowerConfig.maxYield);
-            newFlower.yieldCount = Math.max(newFlower.yieldCount || 0, newYieldCount);
+      setGardens(prevGardens => prevGardens.map(garden => {
+        // 1. Calculate Growth Multipliers
+        const growthMultipliers = new Map();
+        garden.grid.forEach(cell => {
+          if (cell.flower && GAME_CONFIG.DECOR && GAME_CONFIG.DECOR[cell.flower.type]) {
+            const decor = GAME_CONFIG.DECOR[cell.flower.type];
+            if (decor.type === 'growth' || decor.type === 'hybrid') {
+              const radius = decor.radius || 0;
+              const value = decor.value || decor.growthValue || 0;
+              
+              // Apply to neighbors in radius
+              garden.grid.forEach(target => {
+                if (target.id === cell.id) return; // Don't buff self (though decor doesn't grow)
+                const distRow = Math.abs(target.row - cell.row);
+                const distCol = Math.abs(target.col - cell.col);
+                if (distRow <= radius && distCol <= radius) {
+                  const current = growthMultipliers.get(target.id) || 0;
+                  growthMultipliers.set(target.id, current + value);
+                }
+              });
+            }
           }
+        });
 
-          return {
-            ...cell,
-            flower: newFlower
-          };
-        })
-      })));
+        return {
+          ...garden,
+          grid: garden.grid.map(cell => {
+            if (!cell.flower) return cell;
+            
+            // Skip if it's decor (decor has no stages)
+            if (GAME_CONFIG.DECOR && GAME_CONFIG.DECOR[cell.flower.type]) return cell;
+
+            const flowerConfig = GAME_CONFIG.FLOWERS[cell.flower.type];
+            if (!flowerConfig) return cell; // Skip invalid flower types
+
+            // Apply Growth Bonus
+            const multiplier = 1 + (growthMultipliers.get(cell.id) || 0);
+            
+            // "Age" the plant faster by shifting plantedAt back
+            // Only shift if multiplier > 1 to avoid unnecessary updates
+            let currentPlantedAt = cell.flower.plantedAt;
+            if (multiplier > 1) {
+              const realDelta = GAME_CONFIG.TICK_SPEED;
+              const effectiveDelta = realDelta * multiplier;
+              const bonusTime = effectiveDelta - realDelta;
+              currentPlantedAt = currentPlantedAt - bonusTime;
+            }
+
+            const elapsedTime = (Date.now() - currentPlantedAt) / 1000;
+            const progress = elapsedTime / flowerConfig.growthTime;
+
+            let stage;
+            if (progress < 0.33) stage = 0;
+            else if (progress < 0.66) stage = 1;
+            else if (progress < 1) stage = 2;
+            else stage = 3;
+
+            let newFlower = { ...cell.flower, growthStage: stage, plantedAt: currentPlantedAt };
+
+            if (flowerConfig.isInfinite && stage >= 3) {
+              const yieldProgress = (elapsedTime - flowerConfig.growthTime) / flowerConfig.yieldInterval;
+              const newYieldCount = Math.min(Math.floor(yieldProgress) + 1, flowerConfig.maxYield);
+              newFlower.yieldCount = Math.max(newFlower.yieldCount || 0, newYieldCount);
+            }
+
+            return {
+              ...cell,
+              flower: newFlower
+            };
+          })
+        };
+      }));
     }, GAME_CONFIG.TICK_SPEED);
 
     return () => clearInterval(interval);
@@ -150,44 +248,38 @@ export default function GoldGarden() {
 
   const handleMouseUp = () => {
     if (isSelecting && selectedCells.size > 0) {
-      const allMature = Array.from(selectedCells).every(cellId => {
-        const cell = grid.find(c => c.id === cellId);
-        return cell.flower && cell.flower.growthStage >= 3;
-      });
-
-      const allEmpty = Array.from(selectedCells).every(cellId => {
-        const cell = grid.find(c => c.id === cellId);
-        return !cell.flower && !cell.locked;
-      });
-
-      if (allMature) {
-        selectedCells.forEach(cellId => harvestFlower(cellId));
-      } else if (allEmpty) {
-        // Массовая посадка (только если режим 'plant')
-        if (selectedMode === 'plant') {
-          const flowerConfig = GAME_CONFIG.FLOWERS[selectedFlower];
-          const cellsArray = Array.from(selectedCells);
-          let currentCoins = coins;
-          cellsArray.forEach(cellId => {
-            if (currentCoins >= flowerConfig.plantCost) {
-              plantFlower(cellId);
-              currentCoins -= flowerConfig.plantCost;
-            }
-          });
+      if (selectedMode === 'dig') {
+        Array.from(selectedCells).forEach(cellId => {
+          const c = grid.find(x => x.id === cellId);
+          if (c && c.flower) removeFlower(cellId);
+        });
+      } else if (selectedMode === 'fertilize') {
+        Array.from(selectedCells).forEach(cellId => {
+          const c = grid.find(x => x.id === cellId);
+          if (c && c.flower) fertilizeFlower(cellId);
+        });
+      } else if (selectedMode === 'plant') {
+        const itemConfig = GAME_CONFIG.FLOWERS[selectedFlower] || GAME_CONFIG.DECOR[selectedFlower];
+        if (!itemConfig) {
+          setIsSelecting(false);
+          setSelectionStart(null);
+          setSelectedCells(new Set());
+          return;
         }
+        const cellsArray = Array.from(selectedCells);
+        let currentCoins = coins;
+        cellsArray.forEach(cellId => {
+          const c = grid.find(x => x.id === cellId);
+          if (c && !c.locked && !c.flower && currentCoins >= itemConfig.plantCost) {
+            plantFlower(cellId);
+            currentCoins -= itemConfig.plantCost;
+          }
+        });
       } else {
-        // Если есть растения в выделении — выполнить массовую операцию в зависимости от режима
-        if (selectedMode === 'dig') {
-          Array.from(selectedCells).forEach(cellId => {
-            const c = grid.find(x => x.id === cellId);
-            if (c && c.flower) removeFlower(cellId);
-          });
-        } else if (selectedMode === 'fertilize') {
-          Array.from(selectedCells).forEach(cellId => {
-            const c = grid.find(x => x.id === cellId);
-            if (c && c.flower) fertilizeFlower(cellId);
-          });
-        }
+        Array.from(selectedCells).forEach(cellId => {
+          const c = grid.find(x => x.id === cellId);
+          if (c && c.flower && c.flower.growthStage >= 3) harvestFlower(cellId);
+        });
       }
     }
     
@@ -199,23 +291,25 @@ export default function GoldGarden() {
   // plantFlower: update to modify gardens[currentGarden].grid
   function plantFlower(cellId) {
     const cell = grid.find(c => c.id === cellId);
-    const flowerConfig = GAME_CONFIG.FLOWERS[selectedFlower];
+    const itemConfig = GAME_CONFIG.FLOWERS[selectedFlower] || GAME_CONFIG.DECOR[selectedFlower];
 
-    if (cell.locked || cell.flower || isNaN(coins) || coins < flowerConfig.plantCost) return;
+    if (!itemConfig) return;
+    if (cell.locked || cell.flower || isNaN(coins) || coins < itemConfig.plantCost) return;
 
-    setCoins(prev => prev - flowerConfig.plantCost);
+    setCoins(prev => prev - itemConfig.plantCost);
     setGardens(prevGardens => {
       const newGardens = [...prevGardens];
       const g = { ...newGardens[currentGarden] };
-      g.grid = g.grid.map(c => c.id === cellId ? { 
-        ...c, flower: { type: selectedFlower, growthStage: 0, plantedAt: Date.now() } 
-      } : c);
+      const newFlower = GAME_CONFIG.DECOR[selectedFlower]
+        ? { type: selectedFlower, growthStage: 0, plantedAt: Date.now() }
+        : { type: selectedFlower, growthStage: 0, plantedAt: Date.now() };
+      g.grid = g.grid.map(c => c.id === cellId ? { ...c, flower: newFlower } : c);
       newGardens[currentGarden] = g;
       return newGardens;
     });
     
     playSound('plant');
-    addHistoryEntry('plant', flowerConfig.name, flowerConfig.plantCost);
+    addHistoryEntry('plant', itemConfig.name, itemConfig.plantCost);
   }
 
   function harvestFlower(cellId) {
@@ -223,6 +317,7 @@ export default function GoldGarden() {
     if (!cell.flower || cell.flower.growthStage < 3) return;
 
     const flowerType = cell.flower.type;
+    if (GAME_CONFIG.DECOR[flowerType]) return;
     const flowerConfig = GAME_CONFIG.FLOWERS[flowerType];
     if (!flowerConfig) return; // Skip invalid types
 
@@ -278,15 +373,23 @@ export default function GoldGarden() {
     });
 
     playSound('harvest');
-    addHistoryEntry('remove', GAME_CONFIG.FLOWERS[flowerType]?.name || 'Удалено', 0);
+    const name = GAME_CONFIG.FLOWERS[flowerType]?.name || GAME_CONFIG.DECOR[flowerType]?.name || 'Удалено';
+    addHistoryEntry('remove', name, 0);
   }
 
   function fertilizeFlower(cellId) {
     const cell = grid.find(c => c.id === cellId);
     if (!cell || !cell.flower) return;
+    if (GAME_CONFIG.DECOR[cell.flower.type]) return;
+    
+    const cost = 10;
+    if (isNaN(coins) || coins < cost) return;
+
     const cfg = GAME_CONFIG.FLOWERS[cell.flower.type];
     // ускоряем рост: сдвигаем plantedAt назад на ~1/3 времени роста
     const boostMs = Math.round(cfg.growthTime * 1000 * 0.34);
+    
+    setCoins(prev => prev - cost);
     setGardens(prevGardens => {
       const newGardens = [...prevGardens];
       const g = { ...newGardens[currentGarden] };
@@ -301,7 +404,21 @@ export default function GoldGarden() {
       return newGardens;
     });
     playSound('plant');
-    addHistoryEntry('fertilize', GAME_CONFIG.FLOWERS[cell.flower.type]?.name || 'Удобрение', 0);
+    addHistoryEntry('fertilize', GAME_CONFIG.FLOWERS[cell.flower.type]?.name || 'Удобрение', cost);
+  }
+
+  function priceMultiplierForGarden(garden) {
+    let bonus = 0;
+    garden.grid.forEach(cell => {
+      if (cell.flower) {
+        const decor = GAME_CONFIG.DECOR[cell.flower.type];
+        if (decor) {
+          if (decor.type === 'price') bonus += decor.value || 0;
+          if (decor.type === 'hybrid') bonus += decor.priceValue || 0;
+        }
+      }
+    });
+    return 1 + bonus;
   }
 
   // Продать один/несколько цветов из инвентаря
@@ -310,7 +427,9 @@ export default function GoldGarden() {
     const available = inventory[flowerType] || 0;
     if (available < amount || !flowerConfig) return;
 
-    const earnings = flowerConfig.sellPrice * amount;
+    const garden = gardens[currentGarden];
+    const multiplier = priceMultiplierForGarden(garden);
+    const earnings = Math.round(flowerConfig.sellPrice * amount * multiplier);
     setCoins(prev => prev + earnings);
     setInventory(prev => ({
       ...prev,
@@ -329,7 +448,8 @@ export default function GoldGarden() {
       if (count > 0) {
         const flowerConfig = flowerType.includes('_yield') ? GAME_CONFIG.FLOWERS[flowerType.replace('_yield', '')] : GAME_CONFIG.FLOWERS[flowerType];
         if (!flowerConfig) return;
-        const earnings = flowerConfig.sellPrice * count;
+        const multiplier = priceMultiplierForGarden(gardens[currentGarden]);
+        const earnings = Math.round(flowerConfig.sellPrice * count * multiplier);
         totalEarnings += earnings;
         soldItems.push(`${count}x ${flowerConfig.name}`);
       }
@@ -359,12 +479,14 @@ export default function GoldGarden() {
   function unlockFlowerType(flowerType) {
     const flowerConfig = GAME_CONFIG.FLOWERS[flowerType];
     if (!flowerConfig) return;
-    const cost = flowerConfig.unlockCost;
-
-    if (unlockedFlowers.includes(flowerType) || isNaN(coins) || coins < cost) return;
-
-    setCoins(prev => prev - cost);
+    const cost = Number(flowerConfig.unlockCost ?? 0);
+    if (unlockedFlowers.includes(flowerType)) return;
+    if (cost > 0) {
+      if (isNaN(coins) || coins < cost) return;
+      setCoins(prev => prev - cost);
+    }
     setUnlockedFlowers([...unlockedFlowers, flowerType]);
+    setSelectedFlower(flowerType);
   }
 
   function buyGarden() {
@@ -404,14 +526,87 @@ export default function GoldGarden() {
     return Object.values(inventory).reduce((sum, count) => sum + count, 0);
   }
 
-  const flowerKeys = Object.keys(GAME_CONFIG.FLOWERS);
-  const flowersPerPage = 3;
-  const maxPage = Math.ceil(flowerKeys.length / flowersPerPage) - 1;
-  const visibleFlowers = flowerKeys.slice(flowerPage * flowersPerPage, (flowerPage + 1) * flowersPerPage);
+  const isDecorTab = shopTab === 'decor';
+  const currentShopConfig = isDecorTab ? GAME_CONFIG.DECOR : GAME_CONFIG.FLOWERS;
+  const shopKeys = Object.keys(currentShopConfig);
+  
+  const filteredKeys = shopKeys.filter(key => {
+    const item = currentShopConfig[key];
+    const name = item.name.toLowerCase();
+    return name.includes(searchQuery.trim().toLowerCase());
+  });
+  
+  const sortedKeys = [...filteredKeys].sort((a, b) => {
+    const itemA = currentShopConfig[a];
+    const itemB = currentShopConfig[b];
+    const pa = itemA.plantCost ?? 0;
+    const pb = itemB.plantCost ?? 0;
+    if (priceSort === 'asc') return pa - pb;
+    if (priceSort === 'desc') return pb - pa;
+    return 0;
+  });
+  
+  const flowersPerPage = 12;
+  const maxPage = Math.ceil(sortedKeys.length / flowersPerPage) - 1;
+  const visibleItems = sortedKeys.slice(flowerPage * flowersPerPage, (flowerPage + 1) * flowersPerPage);
+
+  const handleDragStart = (e, cell) => {
+    if (selectedMode !== 'transplant' || !cell.flower) {
+      e.preventDefault();
+      return;
+    }
+    if (coins < 25) {
+      e.preventDefault();
+      return;
+    }
+    setDraggedFlower(cell);
+    playSound('pickup');
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e) => {
+    if (selectedMode === 'transplant' && draggedFlower) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    }
+  };
+
+  const handleDrop = (e, targetCell) => {
+    e.preventDefault();
+    if (selectedMode !== 'transplant' || !draggedFlower) return;
+
+    if (targetCell.id === draggedFlower.id) return;
+    if (targetCell.locked || targetCell.flower) return;
+    
+    const cost = 25;
+    if (coins < cost) return;
+
+    setCoins(prev => prev - cost);
+    setGardens(prevGardens => {
+      const newGardens = [...prevGardens];
+      const g = { ...newGardens[currentGarden] };
+      
+      g.grid = g.grid.map(c => c.id === draggedFlower.id ? { ...c, flower: null } : c);
+      g.grid = g.grid.map(c => c.id === targetCell.id ? { 
+        ...c, 
+        flower: draggedFlower.flower 
+      } : c);
+      
+      newGardens[currentGarden] = g;
+      return newGardens;
+    });
+
+    playSound('plant');
+    setDraggedFlower(null);
+    const t = draggedFlower.flower.type;
+    const name = GAME_CONFIG.FLOWERS[t]?.name || GAME_CONFIG.DECOR[t]?.name || 'Предмет';
+    addHistoryEntry('transplant', name, cost);
+  };
 
   function renderCell(cell) {
     const flowerConfig = cell.flower ? GAME_CONFIG.FLOWERS[cell.flower.type] : null;
-    if (cell.flower && !flowerConfig) return <div style={styles.cell}>?</div>; // Invalid flower
+    const decorConfig = cell.flower ? GAME_CONFIG.DECOR[cell.flower.type] : null;
+    if (cell.flower && !flowerConfig && !decorConfig) return <div style={styles.cell}>?</div>;
     
     const isSelected = selectedCells.has(cell.id);
     
@@ -452,6 +647,34 @@ export default function GoldGarden() {
       );
     }
 
+    if (decorConfig) {
+      return (
+        <div
+          draggable={selectedMode === 'transplant'}
+          onDragStart={(e) => handleDragStart(e, cell)}
+          onDragOver={handleDragOver}
+          onDrop={(e) => handleDrop(e, cell)}
+          onClick={() => {
+            if (isSelecting) return;
+            if (selectedMode === 'dig') removeFlower(cell.id);
+          }}
+          onMouseDown={(e) => handleMouseDown(e, cell.id)}
+          onMouseEnter={() => handleMouseEnter(cell.id)}
+          style={{ 
+            ...styles.cell,
+            backgroundColor: decorConfig.color,
+            cursor: selectedMode === 'transplant' ? 'grab' : 'pointer',
+            borderColor: isSelected ? '#3b82f6' : '#9ca3af',
+            border: isSelected ? '3px solid #3b82f6' : '2px solid #9ca3af',
+            position: 'relative',
+            overflow: 'hidden'
+          }}
+        >
+          <span style={{ fontSize: '32px' }}>{decorConfig.sprite}</span>
+        </div>
+      );
+    }
+
     const stage = flowerConfig.stages[Math.min(cell.flower.growthStage, 3)];
     const isReady = cell.flower.growthStage >= 3;
     
@@ -477,17 +700,22 @@ export default function GoldGarden() {
 
     return (
       <div
+        draggable={selectedMode === 'transplant'}
+        onDragStart={(e) => handleDragStart(e, cell)}
+        onDragOver={handleDragOver}
+        onDrop={(e) => handleDrop(e, cell)}
         onClick={() => {
           if (isSelecting) return;
           if (selectedMode === 'dig') removeFlower(cell.id);
           else if (selectedMode === 'fertilize') fertilizeFlower(cell.id);
-          else if (isReady && selectedMode !== 'fertilize' && selectedMode !== 'dig') harvestFlower(cell.id);
+          else if (isReady && selectedMode !== 'fertilize' && selectedMode !== 'dig' && selectedMode !== 'transplant') harvestFlower(cell.id);
         }}
         onMouseDown={(e) => handleMouseDown(e, cell.id)}
         onMouseEnter={() => handleMouseEnter(cell.id)}
         style={{ 
           ...styles.cell,
           backgroundColor: flowerConfig.color,
+          cursor: selectedMode === 'transplant' ? 'grab' : 'pointer',
           borderColor: isSelected ? '#3b82f6' : (isReady ? '#fbbf24' : '#86efac'),
           border: isSelected ? '3px solid #3b82f6' : (isReady ? '2px solid #fbbf24' : '2px solid #86efac'),
           boxShadow: isReady ? '0 0 20px rgba(251, 191, 36, 0.5)' : 'none',
@@ -506,7 +734,11 @@ export default function GoldGarden() {
             animation: 'pulse 2s infinite'
           }} />
         )}
-        <span style={emojiStyle}>{displayEmoji}</span>
+        {flowerConfig.imageDataUri ? (
+          <img src={flowerConfig.imageDataUri} alt={flowerConfig.name} style={{ width: fontSize * 1.8, height: fontSize * 1.8, transition: 'all 0.8s cubic-bezier(0.34, 1.56, 0.64, 1)', display: 'inline-block' }} />
+        ) : (
+          <span style={emojiStyle}>{displayEmoji}</span>
+        )}
       </div>
     );
   }
@@ -534,6 +766,15 @@ export default function GoldGarden() {
     setContextMenu({ show: false, x: 0, y: 0, gardenIndex: null });
   }
 
+  const toggleSort = () => {
+    setFlowerPage(0);
+    setPriceSort(prev => {
+      if (prev === 'none') return 'asc';
+      if (prev === 'asc') return 'desc';
+      return 'none';
+    });
+  };
+
   return (
     <div style={styles.container} onMouseUp={handleMouseUp}>
       <style>{`
@@ -556,6 +797,22 @@ export default function GoldGarden() {
         </div>
 
         <div style={{...styles.card, ...styles.topBar}}>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <span style={{ fontWeight: '600' }}>👤 Игрок:</span>
+              <input
+                type="text"
+                value={tempPlayerName}
+                onChange={(e) => setTempPlayerName(e.target.value.slice(0, 24))}
+                placeholder="имя игрока"
+                style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #d1d5db' }}
+              />
+              <button
+                onClick={() => { setPlayerName(tempPlayerName || 'player1'); loadState(tempPlayerName || 'player1'); }}
+                style={{ padding: '6px 10px', background: '#22c55e', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: '600' }}
+              >
+                Сменить
+              </button>
+            </div>
           <div style={styles.coinsText}>💰 {formatCoins(coins)} coins</div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <button
@@ -574,6 +831,8 @@ export default function GoldGarden() {
               💰 Продать всё
             </button>
 
+
+
             <div 
               style={styles.inventoryText}
               onClick={() => setShowInventory(true)}
@@ -585,66 +844,258 @@ export default function GoldGarden() {
           </div>
         </div>
 
-        <div style={styles.card}>
-          <div style={{display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '12px'}}>
-            <button
-              onClick={() => setFlowerPage(Math.max(0, flowerPage - 1))}
-              disabled={flowerPage === 0}
-              style={{
-                padding: '6px 12px',
-                background: flowerPage === 0 ? '#d1d5db' : '#22c55e',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: flowerPage === 0 ? 'not-allowed' : 'pointer'
-              }}
-            >
-              ◀️
-            </button>
-            <span style={{padding: '6px 12px', fontWeight: 'bold'}}>
-              {flowerPage + 1} / {maxPage + 1}
-            </span>
-            <button
-              onClick={() => setFlowerPage(Math.min(maxPage, flowerPage + 1))}
-              disabled={flowerPage === maxPage}
-              style={{
-                padding: '6px 12px',
-                background: flowerPage === maxPage ? '#d1d5db' : '#22c55e',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: flowerPage === maxPage ? 'not-allowed' : 'pointer'
-              }}
-            >
-              ▶️
-            </button>
+        <div style={styles.mainGrid}>
+          {/* Left Column: Garden & Buttons */}
+          <div style={styles.leftColumn}>
+            <div style={styles.card}>
+              <div>
+                <div style={styles.tabsPager}>
+                  <button
+                    onClick={() => setGardenTabsPage(p => Math.max(0, p - 1))}
+                    disabled={gardenTabsPage === 0}
+                    style={{
+                      padding: '6px 12px',
+                      background: gardenTabsPage === 0 ? '#d1d5db' : '#22c55e',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: gardenTabsPage === 0 ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    ◀
+                  </button>
+                  <span style={{ fontWeight: 'bold' }}>
+                    {gardenTabsPage + 1} / {Math.max(1, Math.ceil(gardens.length / 6))}
+                  </span>
+                  <button
+                    onClick={() => setGardenTabsPage(p => Math.min(Math.max(0, Math.ceil(gardens.length / 6) - 1), p + 1))}
+                    disabled={gardenTabsPage >= Math.max(0, Math.ceil(gardens.length / 6) - 1)}
+                    style={{
+                      padding: '6px 12px',
+                      background: gardenTabsPage >= Math.max(0, Math.ceil(gardens.length / 6) - 1) ? '#d1d5db' : '#22c55e',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: gardenTabsPage >= Math.max(0, Math.ceil(gardens.length / 6) - 1) ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    ▶
+                  </button>
+                </div>
+                <div style={styles.horizontalGardenTabs}>
+                  {gardens.slice(gardenTabsPage * 6, gardenTabsPage * 6 + 6).map((g, idx) => {
+                    const absoluteIdx = gardenTabsPage * 6 + idx;
+                    return (
+                      <div key={absoluteIdx} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <button
+                          onClick={() => setCurrentGarden(absoluteIdx)}
+                          onDoubleClick={(e) => handleGardenContextMenu(e, absoluteIdx)}
+                          style={{
+                            ...styles.gardenTab,
+                            borderColor: g.color,
+                            background: currentGarden === absoluteIdx ? '#22c55e' : 'white',
+                            color: currentGarden === absoluteIdx ? 'white' : 'black',
+                            boxShadow: currentGarden === absoluteIdx ? '0 4px 8px rgba(0,0,0,0.2)' : 'none',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px'
+                          }}
+                          title="Двойной клик для настроек"
+                        >
+                          <span style={{ width: 12, height: 12, borderRadius: 6, background: g.color, display: 'inline-block' }} />
+                          {g.name}
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {gardens.length < GAME_CONFIG.MAX_GARDENS && (
+                    <button
+                      onClick={buyGarden}
+                      disabled={coins < 1000}
+                      style={{
+                        ...styles.buyGardenTab,
+                        borderColor: '#fbbf24',
+                        background: coins >= 1000 ? '#fef3c7' : '#f3f4f6',
+                        cursor: coins >= 1000 ? 'pointer' : 'not-allowed',
+                        opacity: coins >= 1000 ? 1 : 0.5
+                      }}
+                    >
+                      + Купить сад (1000💰)
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div style={{display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '12px', alignItems: 'center', flexWrap: 'wrap'}}>
+                <div style={styles.sectionTitle}>🌻 {gardens[currentGarden].name}</div>
+              </div>
+              
+              <div style={styles.gardenGrid}>
+                {grid.map(cell => (
+                  <div key={cell.id}>
+                    {renderCell(cell)}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{...styles.card, ...styles.buttonGroup}}>
+              <button
+                onClick={() => setShowHistory(true)}
+                style={{...styles.button, backgroundColor: '#22c55e'}}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#16a34a'}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#22c55e'}
+              >
+                📜 История
+              </button>
+              <button
+                onClick={() => setShowResetConfirm(true)}
+                style={{...styles.button, backgroundColor: '#ef4444'}}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#dc2626'}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ef4444'}
+              >
+                🔄 Сбросить прогресс
+              </button>
+            </div>
+          </div>
+
+          {/* Right Column: Shop */}
+          <div style={styles.rightColumn}>
+            <div style={styles.card}>
+              <h3 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '16px', color: '#16a34a' }}>🏪 Магазин</h3>
+              
+              {/* Shop Tabs */}
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+                <button
+                  onClick={() => { setShopTab('flowers'); setFlowerPage(0); }}
+                  style={{
+                    flex: 1,
+                    padding: '8px',
+                    background: shopTab === 'flowers' ? '#16a34a' : '#f3f4f6',
+                    color: shopTab === 'flowers' ? 'white' : 'black',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  🌸 Цветы
+                </button>
+                <button
+                  onClick={() => { setShopTab('decor'); setFlowerPage(0); }}
+                  style={{
+                    flex: 1,
+                    padding: '8px',
+                    background: shopTab === 'decor' ? '#ca8a04' : '#f3f4f6',
+                    color: shopTab === 'decor' ? 'white' : 'black',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  🗿 Декор
+                </button>
+              </div>
+
+              <div style={{display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '12px', flexWrap: 'wrap'}}>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => { setFlowerPage(0); setSearchQuery(e.target.value); }}
+                  placeholder="Поиск..."
+                  style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid #d1d5db', width: '100%' }}
+                />
+           <div style={{ display: 'flex', gap: '8px', width: '100%', justifyContent: 'space-between' }}>
+             <button
+               onClick={toggleSort}
+               style={{ 
+                 padding: '6px 12px', 
+                 borderRadius: '6px', 
+                 border: '1px solid #d1d5db',
+                 background: '#f3f4f6',
+                 cursor: 'pointer',
+                 flex: 1
+               }}
+               title="Сортировка по цене"
+             >
+               {priceSort === 'asc' ? '💸 ⬆️' : priceSort === 'desc' ? '💸 ⬇️' : '💸 ↕️'}
+             </button>
+             <div style={{ display: 'flex', gap: '4px' }}>
+               <button
+                 onClick={() => setFlowerPage(Math.max(0, flowerPage - 1))}
+                 disabled={flowerPage === 0}
+                 style={{
+                   padding: '6px 12px',
+                   background: flowerPage === 0 ? '#d1d5db' : '#22c55e',
+                   color: 'white',
+                   border: 'none',
+                   borderRadius: '6px',
+                   cursor: flowerPage === 0 ? 'not-allowed' : 'pointer'
+                 }}
+               >
+                 ◀️
+               </button>
+               <span style={{padding: '6px 12px', fontWeight: 'bold', minWidth: '60px', textAlign: 'center'}}>
+                 {flowerPage + 1} / {maxPage + 1}
+               </span>
+               <button
+                 onClick={() => setFlowerPage(Math.min(maxPage, flowerPage + 1))}
+                 disabled={flowerPage === maxPage}
+                 style={{
+                   padding: '6px 12px',
+                   background: flowerPage === maxPage ? '#d1d5db' : '#22c55e',
+                   color: 'white',
+                   border: 'none',
+                   borderRadius: '6px',
+                   cursor: flowerPage === maxPage ? 'not-allowed' : 'pointer'
+                 }}
+               >
+                 ▶️
+               </button>
+             </div>
+           </div>
           </div>
           
           <div style={styles.flowerGrid}>
-            {visibleFlowers.map(key => {
-              const flower = GAME_CONFIG.FLOWERS[key];
-              const isUnlocked = unlockedFlowers.includes(key);
+            {visibleItems.map(key => {
+              const item = currentShopConfig[key];
+              const isUnlocked = isDecorTab ? true : unlockedFlowers.includes(key);
               const isSelected = selectedFlower === key;
 
               return (
                 <div
                   key={key}
-                  onClick={() => isUnlocked ? setSelectedFlower(key) : unlockFlowerType(key)}
+                  onClick={() => {
+                    if (isDecorTab) {
+                      setSelectedFlower(key);
+                    } else {
+                      isUnlocked ? setSelectedFlower(key) : unlockFlowerType(key);
+                    }
+                  }}
                   style={{
                     ...styles.flowerCard,
-                    backgroundColor: isUnlocked ? flower.color : '#f3f4f6',
+                    backgroundColor: isUnlocked ? item.color : '#f3f4f6',
                     borderColor: isSelected ? '#22c55e' : '#d1d5db',
                     opacity: isUnlocked ? 1 : 0.6
                   }}
                 >
-                  <div style={{ fontSize: '32px', marginBottom: '4px' }}>{flower.sprite}</div>
-                  <div style={{ fontWeight: 'bold' }}>{flower.name}</div>
-                  <div style={{ fontSize: '12px' }}>Цена: {flower.plantCost}💰</div>
-                  <div style={{ fontSize: '12px' }}>Продажа: {flower.sellPrice}💰</div>
-                  <div style={{ fontSize: '11px', color: '#666' }}>{flower.growthTime}s</div>
-                  {!isUnlocked && (
+                  <div style={{ marginBottom: '4px', display: 'flex', justifyContent: 'center' }}>
+                    {item.imageDataUri ? (
+                      <img src={item.imageDataUri} alt={item.name} style={{ width: 48, height: 48 }} />
+                    ) : (
+                      <span style={{ fontSize: '32px' }}>{item.sprite}</span>
+                    )}
+                  </div>
+                  <div style={{ fontWeight: 'bold' }}>{item.name}</div>
+                  <div style={{ fontSize: '12px' }}>{item.plantCost}💰</div>
+                  {isDecorTab && item.description && (
+                    <div style={{ fontSize: '10px', color: '#555', marginTop: '4px' }}>
+                      {item.description}
+                    </div>
+                  )}
+                  {!isDecorTab && !isUnlocked && (Number(item.unlockCost ?? 0) > 0) && (
                     <div style={{ fontSize: '11px', marginTop: '4px' }}>
-                      🔒 Unlock: {flower.unlockCost}💰
+                      🔓 {Number(item.unlockCost)}💰
                     </div>
                   )}
                 </div>
@@ -652,77 +1103,7 @@ export default function GoldGarden() {
             })}
           </div>
         </div>
-
-        <div style={styles.card}>
-          <div style={styles.verticalGardenTabs}>
-            {gardens.map((g, idx) => (
-              <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <button
-                  onClick={() => setCurrentGarden(idx)}
-                  onDoubleClick={(e) => handleGardenContextMenu(e, idx)}
-                  style={{
-                    ...styles.gardenTab,
-                    borderColor: g.color,
-                    background: currentGarden === idx ? '#22c55e' : 'white',
-                    color: currentGarden === idx ? 'white' : 'black',
-                    boxShadow: currentGarden === idx ? '0 4px 8px rgba(0,0,0,0.2)' : 'none',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '6px'
-                  }}
-                  title="Двойной клик для настроек"
-                >
-                  <span style={{ width: 12, height: 12, borderRadius: 6, background: g.color, display: 'inline-block' }} />
-                  {g.name}
-                </button>
-              </div>
-            ))}
-            {gardens.length < GAME_CONFIG.MAX_GARDENS && (
-              <button
-                onClick={buyGarden}
-                disabled={coins < 1000}
-                style={{
-                  ...styles.buyGardenTab,
-                  borderColor: '#fbbf24',
-                  background: coins >= 1000 ? '#fef3c7' : '#f3f4f6',
-                  cursor: coins >= 1000 ? 'pointer' : 'not-allowed',
-                  opacity: coins >= 1000 ? 1 : 0.5
-                }}
-              >
-                + Купить сад (1000💰)
-              </button>
-            )}
           </div>
-          <div style={{display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '12px', alignItems: 'center', flexWrap: 'wrap'}}>
-            <div style={styles.sectionTitle}>🌻 {gardens[currentGarden].name}</div>
-          </div>
-           
-           <div style={styles.gardenGrid}>
-            {grid.map(cell => (
-               <div key={cell.id}>
-                 {renderCell(cell)}
-               </div>
-             ))}
-           </div>
-         </div>
-
-        <div style={{...styles.card, ...styles.buttonGroup}}>
-          <button
-            onClick={() => setShowHistory(true)}
-            style={{...styles.button, backgroundColor: '#22c55e'}}
-            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#16a34a'}
-            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#22c55e'}
-          >
-            📜 История
-          </button>
-          <button
-            onClick={() => setShowResetConfirm(true)}
-            style={{...styles.button, backgroundColor: '#ef4444'}}
-            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#dc2626'}
-            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ef4444'}
-          >
-            🔄 Сбросить прогресс
-          </button>
         </div>
 
         {showInventory && (
@@ -950,6 +1331,11 @@ export default function GoldGarden() {
             style={{ ...styles.modeButton, background: selectedMode === 'fertilize' ? '#fde68a' : '#fef3c7' }}
             title="Режим удобрить (B)"
           >🌿 Удобрить</button>
+          <button
+            onClick={() => { setSelectedMode(prev => prev === 'transplant' ? null : 'transplant'); playSound('switch'); }}
+            style={{ ...styles.modeButton, background: selectedMode === 'transplant' ? '#c084fc' : '#fef3c7' }}
+            title="Режим пересадки (C)"
+          >🔄 Пересадить</button>
         </div>
 
         {/* Garden context menu */}

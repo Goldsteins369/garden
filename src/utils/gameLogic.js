@@ -126,6 +126,12 @@ export function unlockFlowerType(flowerType, unlockedFlowers, coins, setCoins, s
   if (!flowerConfig) return;
   const cost = flowerConfig.unlockCost;
 
+  // Ensure cost is a valid number
+  if (typeof cost !== 'number' || isNaN(cost)) {
+    console.error(`Missing unlockCost for ${flowerType}`);
+    return;
+  }
+
   if (unlockedFlowers.includes(flowerType) || isNaN(coins) || coins < cost) return;
 
   setCoins(prev => prev - cost);

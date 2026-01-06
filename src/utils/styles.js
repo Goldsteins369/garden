@@ -59,6 +59,21 @@ export const styles = {
     marginBottom: '12px',
     textAlign: 'center'
   },
+  mainGrid: {
+    display: 'flex',
+    gap: '24px',
+    alignItems: 'flex-start',
+    flexWrap: 'wrap'
+  },
+  leftColumn: {
+    flex: '1',
+    minWidth: '460px'
+  },
+  rightColumn: {
+    flex: '1',
+    minWidth: '300px',
+    maxWidth: '500px'
+  },
   flowerGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
@@ -213,6 +228,23 @@ export const styles = {
     flexDirection: 'column',
     gap: '8px',
     minWidth: '120px'
+  },
+  horizontalGardenTabs: {
+    display: 'flex',
+    flexDirection: 'row',
+    gap: '8px',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'nowrap',
+    overflow: 'hidden',
+    padding: '4px 0'
+  },
+  tabsPager: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    marginBottom: '8px'
   },
   fixedGardenTabs: {
     position: 'fixed',

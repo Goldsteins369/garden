@@ -1,4 +1,12 @@
+const lastPlayed = {};
+
 export const playSound = (type) => {
+  const now = Date.now();
+  if (lastPlayed[type] && now - lastPlayed[type] < 100) {
+    return;
+  }
+  lastPlayed[type] = now;
+
   try {
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const oscillator = audioContext.createOscillator();
@@ -33,6 +41,12 @@ export const playSound = (type) => {
       gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.05);
       oscillator.start(audioContext.currentTime);
       oscillator.stop(audioContext.currentTime + 0.05);
+    } else if (type === 'pickup') {
+      oscillator.frequency.setValueAtTime(1000, audioContext.currentTime);
+      gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.1);
     }
   } catch (e) {
     console.log('Audio context not available');
